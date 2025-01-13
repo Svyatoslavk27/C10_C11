@@ -1,24 +1,17 @@
-using Microsoft.AspNetCore.SignalR;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using WebApplication1.Hubs;
+using System.Collections.Concurrent;
+using System.Threading.Tasks;
+using System.IO;
+using System.Threading;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
 builder.Logging.AddDebug();
-
-builder.Services.AddCors(options =>
-{
-    options.AddPolicy("AllowSpecificOrigins", builder =>
-    {
-        builder.WithOrigins("http://localhost:5127", "https://localhost:7281") 
-               .AllowAnyMethod()
-               .AllowAnyHeader()
-               .AllowCredentials();
-    });
-});
-
-builder.Services.AddSignalR();
 
 builder.Services.AddControllersWithViews();
 
@@ -35,14 +28,46 @@ app.UseStaticFiles();
 
 app.UseRouting();
 
-app.UseCors("AllowSpecificOrigins");
-
 app.UseAuthorization();
 
 app.MapControllerRoute(
     name: "default",
     pattern: "{controller=Home}/{action=Index}/{id?}");
 
-app.MapHub<ToDoHub>("/todoHub");
+var taskUpdates = new ConcurrentQueue<string>();
+
+app.MapGet("/poll", async (HttpContext context) =>
+{
+    var tcs = new TaskCompletionSource<bool>();
+    var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    var token = cts.Token;
+
+    token.Register(() => tcs.TrySetResult(true));
+
+    using (token.Register(() => tcs.TrySetResult(true)))
+    {
+        while (!taskUpdates.IsEmpty)
+        {
+            if (taskUpdates.TryDequeue(out var taskUpdate))
+            {
+                await context.Response.WriteAsync(taskUpdate);
+                return;
+            }
+        }
+
+        await tcs.Task;
+        if (!taskUpdates.IsEmpty && taskUpdates.TryDequeue(out var update))
+        {
+            await context.Response.WriteAsync(update);
+        }
+    }
+});
+
+app.MapPost("/update", async (HttpContext context) =>
+{
+    var message = await new StreamReader(context.Request.Body).ReadToEndAsync();
+    taskUpdates.Enqueue(message);
+    context.Response.StatusCode = 200;
+});
 
 app.Run();
